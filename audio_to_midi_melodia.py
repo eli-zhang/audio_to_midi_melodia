@@ -265,45 +265,45 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
 
     def get_weights(bins, harmonics, harmonic_weight, peaks):  # tuples is an f x (N_h - 1) x I array
         # Need to find the weight for all weight(b, h, f_info[i])
-        # t1 = time.time()
+        t1 = time.time()
         positive_peaks = np.where(peaks / harmonics / 55 <= 0, 1, peaks)    # This is just to prevent errors from being thrown for negative values, it is overridden in the return np.where
-        # t2 = time.time()
+        t2 = time.time()
         semitone_dists = np.abs(np.floor(1200 * np.log2(positive_peaks / harmonics / 55) / 10 + 1) - bins) / 10
-        # t3 = time.time()
+        t3 = time.time()
         # alpha = 0.8
 
-        # t4 = time.time()
-        # logical_or = np.logical_or(semitone_dists > 1, peaks <= 0)
-        # t5 = time.time()
-        # cosine = np.cos(semitone_dists * np.pi / 2)
-        # t6 = time.time()
+        t4 = time.time()
+        logical_or = np.logical_or(semitone_dists > 1, peaks <= 0)
+        t5 = time.time()
+        cosine = np.cos(semitone_dists * np.pi / 2)
+        t6 = time.time()
 
-        # squared = cosine ** 2
-        # t7 = time.time()
+        squared = cosine ** 2
 
-        # t8 = time.time()
+        t8 = time.time()
 
-        # product = squared * harmonic_weight
-        # t9 = time.time()
+        product = squared * harmonic_weight
+        t9 = time.time()
 
-        # where = np.where(logical_or, 0, product)
-        # t10 = time.time()
+        where = np.where(logical_or, 0, product)
+        t10 = time.time()
 
-        # result = np.where(np.logical_or(semitone_dists > 1, peaks <= 0), 0, np.cos(semitone_dists * np.pi / 2) ** 2 * (alpha ** (harmonics - 1)))
-        # t11 = time.time()
+        result = where
+        t11 = time.time()
 
         # print("positive_peaks calc time {}".format(t2 - t1))
         # print("semitone_dist calc time {}".format(t3 - t2))
         # print("or calc time {}".format(t5 - t4))
         # print("cosine calc time {}".format(t6 - t5))
-        # print("squared calc time {}".format(t7 - t6))
-        # print("alpha harmonics calc time {}".format(t8 - t7))
+        # print("squared calc time {}".format(t8 - t6))
         # print("where calc time {}".format(t9 - t8))
         # print("where calc time {}".format(t10 - t9))
         # print("result calc time {}".format(t11 - t10))
 
+        return result
 
-        return np.where(np.logical_or(semitone_dists > 1, peaks <= 0), 0, np.cos(semitone_dists * np.pi / 2) ** 2 * harmonic_weight)
+
+        # return np.where(np.logical_or(semitone_dists > 1, peaks <= 0), 0, np.cos(semitone_dists * np.pi / 2) ** 2 * harmonic_weight)
 
     # Finds the indices of magnitude peaks for time step (frame number) l at time_info[l] (which is Zxx.T[l])
     def find_peaks(l, time_info):
@@ -325,23 +325,51 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
     # plt.show()
 
     for l in tqdm(range(len(t))): # for every time step
+        time1 = time.time()
         peak_idxs = find_peaks(l, time_info)    # indices of frequency peaks
+        time2 = time.time()
         b_offsets = get_bin_offsets(l, time_info, peak_idxs)
+        time3 = time.time()
         hann_info = 1 / 2 * np.sinc(M / N * np.pi * M / N * b_offsets) / np.square(1 - M / N * M / N * b_offsets)
+        time4 = time.time()
 
         f_info = (peak_idxs + b_offsets) * fs / N # size = number of frequency peaks
         a_info = 1 / 2 * np.abs(time_info[l][peak_idxs] / hann_info)
-        # f_info = np.array([(k_i + b_offsets[i]) * fs / N for i, k_i in enumerate(peak_idxs)]).flatten()
-        # a_info = np.array([1 / 2 * np.abs(time_info[l][k_i] / hann(M / N * b_offsets[i])) for i, k_i in enumerate(peak_idxs)]).flatten()
         I = len(peak_idxs)
-        
-        bins = np.array([[[b for _ in range(I)] for _ in range(1, N_h)] for b in f])
-        harmonics = np.array([[[h for _ in range(I)] for h in range(1, N_h)] for _ in f])
-        peaks = np.array([[[f_info[i] for i in range(I)] for _ in range(1, N_h)] for _ in f])
+
+        time5 = time.time()
+
+        # bins = np.array([[[b for _ in range(I)] for _ in range(1, N_h)] for b in f])
+        # What I have:
+        # [f1 f2 f3 f4 ...]
+        # What I need:
+        # [[[f1 f1 f1 f1 ... xI ] [f1 f1 f1 f1 ... xI ] ... x (N_h - 1) ] 
+        # [[f2 f2 f2 f2 ... xI ] [f2 f2 f2 f2 ... xI ] ... x (N_h - 1) ] ... ]
+        bins = np.reshape(np.repeat(f, I * (N_h - 1)), (len(f), N_h - 1, I))
+        # What I have:
+        # [1, 2, 3, 4, ... x (N_h - 1)]
+        # What I need:
+        # [[[1 1 1 1 ... xI ] [2 2 2 2 ... xI ] ... x (N_h - 1) ] 
+        # [[1 1 1 1 ... xI ] [2 2 2 2 ... xI ] ... x (N_h - 1) ] ... ]
+        harmonics = np.reshape(np.tile(np.repeat(np.arange(1, N_h), I), len(f)), (len(f), N_h - 1, I))
+
+        # What I have:
+        # [f_inf1 f_inf2 f_inf3 ... x (# peaks)]
+        # What I need:
+        # [[[f_inf1 f_inf2 f_inf3 ... x (# peaks)] [f_inf1 f_inf2 f_inf3 ... x (# peaks) ] ... x (N_h - 1) ] 
+        # [[[f_inf1 f_inf2 f_inf3 ... x (# peaks)] [f_inf1 f_inf2 f_inf3 ... x (# peaks) ] ... x (N_h - 1) ] ... ]
+        peaks = np.reshape(np.tile(f_info, (len(f) * (N_h - 1))), (len(f), N_h - 1, I))
+
+        time6 = time.time()
+
+        print("find peaks time {}".format(time2 - time1))
+        print("offset time {}".format(time3 - time2))
+        print("hann time {}".format(time4 - time3))
+        print("info time {}".format(time5 - time4))
+        print("list comp time {}".format(time6 - time5))
 
         harmonic_weight = np.power(0.8, harmonics - 1)
 
-        
         # get_thresholds   # size: I (# of peaks)
         # get_weights      # size: f x (N_h - 1) x I array
 
@@ -358,11 +386,12 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
             t4 = time.time()
             sum = np.sum(weight_info * threshold_info * other_info, axis=(1, 2))
             t5 = time.time()
-            print("weight calc time {}".format(t2 - t1))
-            print("threshold calc time {}".format(t3 - t2))
-            print("other calc time {}".format(t4 - t3))
-            print("sum calc time {}".format(t5 - t4))
-            salience[l] = np.sum(get_weights(bins, harmonics, harmonic_weight, peaks) * get_thresholds(a_info)[None, None, :] * (a_info ** beta)[None, None, :], axis=(1, 2))
+            # print("weight calc time {}".format(t2 - t1))
+            # print("threshold calc time {}".format(t3 - t2))
+            # print("other calc time {}".format(t4 - t3))
+            # print("sum calc time {}".format(t5 - t4))
+            salience[l] = sum
+            # salience[l] = np.sum(get_weights(bins, harmonics, harmonic_weight, peaks) * get_thresholds(a_info)[None, None, :] * (a_info ** beta)[None, None, :], axis=(1, 2))
         # print(f[np.argmax(salience[l])])
 
         salience_threshold = 30
