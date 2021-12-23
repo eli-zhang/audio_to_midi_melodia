@@ -8,8 +8,19 @@ import os
 import numpy as np
 from midiutil.MidiFile import MIDIFile
 from scipy.signal import medfilt
+from scipy.signal import butter, sosfilt, sosfreqz
+from scipy import signal
 import jams
 import __init__
+
+from scipy.signal import argrelextrema
+
+import matplotlib.pyplot as plt
+import numpy as np
+import math
+from tqdm import tqdm
+import time
+
 
 '''
 Extract the melody from an audio file and convert it to MIDI.
@@ -81,7 +92,7 @@ def save_midi(outfile, notes, tempo):
         onset = note[0] * (tempo/60.)
         duration = note[1] * (tempo/60.)
         # duration = 1
-        pitch = note[2]
+        pitch = note[2].__int__()
         midifile.addNote(track, channel, pitch, onset, duration, volume)
 
     # And write it to disk.
@@ -104,7 +115,7 @@ def midi_to_notes(midi, fs, hop, smooth, minduration):
     # print(len(midi),len(midi_filt))
 
     notes = []
-    p_prev = None
+    p_prev = 0
     duration = 0
     onset = 0
     for n, p in enumerate(midi_filt):
@@ -154,7 +165,7 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
                           savejams=False):
 
     # define analysis parameters
-    fs = 44100
+    fs = 6000 # Usually 44100, but the vocal range of humans only goes to around ~3000 Hz and we only care about the melody
     hop = 128
 
     # load audio using librosa
@@ -168,20 +179,209 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
         data = resampy.resample(data, sr, fs)
         sr = fs
 
-    # extract melody using melodia vamp plugin
-    print("Extracting melody f0 with MELODIA...")
-    melody = vamp.collect(data, sr, "mtg-melodia:melodia",
-                          parameters={"voicing": 0.2})
+    # np.set_printoptions(threshold=np.inf)
+    # np.set_printoptions(suppress=True)
 
-    # hop = melody['vector'][0]
-    pitch = melody['vector'][1]
+    interval = int(len(data)/3)
 
-    # impute missing 0's to compensate for starting timestamp
-    pitch = np.insert(pitch, 0, [0]*8)
+    data = data[:interval] # Temporary: limit testing range
+
+    def butter_bandpass(lowcut, highcut, fs, order=5):
+        nyq = 0.5 * fs
+        low = lowcut / nyq
+        high = highcut / nyq
+        sos = butter(order, [low, high], analog=False, btype='band', output='sos')
+        return sos
+
+    def butter_bandpass_filter(data, lowcut, highcut, fs, order=5):
+        sos = butter_bandpass(lowcut, highcut, fs, order=order)
+        y = sosfilt(sos, data)
+        return y
+
+    data = butter_bandpass_filter(data, 50, 2000, fs, order=2)  # Run data through a bandpass filter to only include melodies within potential singing vocal range
+
+    # M = 2048 # Window length
+    # H = 128 # H is hopsize (defaults to nperseg - noverlap), used later
+    # N = 8192 # Length of FFT used (defaults to nperseg)
+    M = 400
+    H = 100
+    N = 1000
+    noverlap = M - H
+    nperseg = M
+    
+    f, t, Zxx = signal.stft(data, fs, nperseg=nperseg, noverlap=noverlap, nfft=N)
+    print("Finished fetching FFT")
+    # print(Zxx.shape) # f x t
+
+    # 0 Hz: [t1 t2 t3 t4]
+    # 1 Hz: [t1 t2 t3 t4]
+    # 2 Hz: [t1 t2 t3 t4]
+
+    # print(len(Zxx[0]))
+
+    # print(Zxx)
+    # print(f.shape) # 0 to fs / 2
+    # print(t.shape) # 0 to time in secs (duration of song)
+
+    time_info = Zxx.T   # we use the transpose, which is t x f
+
+    # t0: [H1 H2 H3 H4 H5]
+
+    # def get_bin(f):
+    #     return np.floor(1200 * np.log2(f / 55) / 10 + 1)
+
+    # def threshold(a_i, a_m):   # e(a)
+    #     gamma = 40
+    #     if (20 * np.log10(a_m / a_i)) < gamma:
+    #         return 1
+    #     return 0
+
+    # def weight(b, h, f_i):    # weight given to peak p, hth harmonic of bin b
+    #     dist = semitone_dist(b, h, f_i)
+    #     alpha = 0.8
+    #     if dist > 1: 
+    #         return 0
+    #     return np.cos(dist * np.pi / 2) ** 2 * (alpha ** (h - 1))
+
+    # # distance in semitones between harmonic frequency and center frequency of bin b
+    # def semitone_dist(b, h, f):    # delta
+    #     return np.abs(get_bin(f / h) - b) / 10
+    
+    # def princarg(theta):
+    #     return (theta + np.pi) % (-2 * np.pi) + np.pi
+
+    # def bin_offset(l, k_i, time_info):
+    #     phi_l = np.angle(time_info[l][k_i])
+    #     phi_l_minus_one = 0 if l == 0 else np.angle(time_info[l - 1][k_i])
+    #     return N / 2 / np.pi / H * princarg(phi_l - phi_l_minus_one - 2 * np.pi * H / N * k_i)
+
+    # def hann(k):
+    #     return 1 / 2 * np.sinc(M / N * np.pi * k) / (1 - M / N * k) ** 2
+
+    def get_thresholds(a_info):
+        gamma = 40
+        a_m = np.amax(a_info)
+        return ((20 * np.log10(a_m / a_info)) < gamma).astype(int)
+
+    def get_weights(bins, harmonics, harmonic_weight, peaks):  # tuples is an f x (N_h - 1) x I array
+        # Need to find the weight for all weight(b, h, f_info[i])
+        # t1 = time.time()
+        positive_peaks = np.where(peaks / harmonics / 55 <= 0, 1, peaks)    # This is just to prevent errors from being thrown for negative values, it is overridden in the return np.where
+        # t2 = time.time()
+        semitone_dists = np.abs(np.floor(1200 * np.log2(positive_peaks / harmonics / 55) / 10 + 1) - bins) / 10
+        # t3 = time.time()
+        # alpha = 0.8
+
+        # t4 = time.time()
+        # logical_or = np.logical_or(semitone_dists > 1, peaks <= 0)
+        # t5 = time.time()
+        # cosine = np.cos(semitone_dists * np.pi / 2)
+        # t6 = time.time()
+
+        # squared = cosine ** 2
+        # t7 = time.time()
+
+        # t8 = time.time()
+
+        # product = squared * harmonic_weight
+        # t9 = time.time()
+
+        # where = np.where(logical_or, 0, product)
+        # t10 = time.time()
+
+        # result = np.where(np.logical_or(semitone_dists > 1, peaks <= 0), 0, np.cos(semitone_dists * np.pi / 2) ** 2 * (alpha ** (harmonics - 1)))
+        # t11 = time.time()
+
+        # print("positive_peaks calc time {}".format(t2 - t1))
+        # print("semitone_dist calc time {}".format(t3 - t2))
+        # print("or calc time {}".format(t5 - t4))
+        # print("cosine calc time {}".format(t6 - t5))
+        # print("squared calc time {}".format(t7 - t6))
+        # print("alpha harmonics calc time {}".format(t8 - t7))
+        # print("where calc time {}".format(t9 - t8))
+        # print("where calc time {}".format(t10 - t9))
+        # print("result calc time {}".format(t11 - t10))
+
+
+        return np.where(np.logical_or(semitone_dists > 1, peaks <= 0), 0, np.cos(semitone_dists * np.pi / 2) ** 2 * harmonic_weight)
+
+    # Finds the indices of magnitude peaks for time step (frame number) l at time_info[l] (which is Zxx.T[l])
+    def find_peaks(l, time_info):
+        return argrelextrema(np.abs(time_info[l]), np.greater)[0]
+
+    def get_bin_offsets(l, time_info, peak_idxs):
+        phi_l = np.angle(time_info[l][peak_idxs])
+        phi_l_minus_one = np.zeros(phi_l.shape[0]) if l == 0 else np.angle(time_info[l - 1][peak_idxs])
+        return  N / 2 / np.pi / H * (((phi_l - phi_l_minus_one - 2 * np.pi * H / N * peak_idxs) + np.pi) % (2 * np.pi) - np.pi)
+
+    salience = [[0 for i in range(len(f))] for j in range(len(t))]  # salience represents the likelihood that a frequency at a given time is the melody
+    N_h = 10
+    beta = 1
+    alpha = 0.8
+    # plt.pcolormesh(t, f, np.abs(Zxx), shading='gouraud')
+    # plt.title('STFT Magnitude')
+    # plt.ylabel('Frequency [Hz]')
+    # plt.xlabel('Time [sec]')
+    # plt.show()
+
+    for l in tqdm(range(len(t))): # for every time step
+        peak_idxs = find_peaks(l, time_info)    # indices of frequency peaks
+        b_offsets = get_bin_offsets(l, time_info, peak_idxs)
+        hann_info = 1 / 2 * np.sinc(M / N * np.pi * M / N * b_offsets) / np.square(1 - M / N * M / N * b_offsets)
+
+        f_info = (peak_idxs + b_offsets) * fs / N # size = number of frequency peaks
+        a_info = 1 / 2 * np.abs(time_info[l][peak_idxs] / hann_info)
+        # f_info = np.array([(k_i + b_offsets[i]) * fs / N for i, k_i in enumerate(peak_idxs)]).flatten()
+        # a_info = np.array([1 / 2 * np.abs(time_info[l][k_i] / hann(M / N * b_offsets[i])) for i, k_i in enumerate(peak_idxs)]).flatten()
+        I = len(peak_idxs)
+        
+        bins = np.array([[[b for _ in range(I)] for _ in range(1, N_h)] for b in f])
+        harmonics = np.array([[[h for _ in range(I)] for h in range(1, N_h)] for _ in f])
+        peaks = np.array([[[f_info[i] for i in range(I)] for _ in range(1, N_h)] for _ in f])
+
+        harmonic_weight = np.power(0.8, harmonics - 1)
+
+        
+        # get_thresholds   # size: I (# of peaks)
+        # get_weights      # size: f x (N_h - 1) x I array
+
+        if (len(a_info) == 0):
+            salience[l] = np.zeros(len(f))
+        else:
+            # do some timing
+            t1 = time.time()
+            weight_info = get_weights(bins, harmonics, harmonic_weight, peaks)
+            t2 = time.time()
+            threshold_info = get_thresholds(a_info)[None, None, :]
+            t3 = time.time()
+            other_info = (a_info ** beta)[None, None, :]
+            t4 = time.time()
+            sum = np.sum(weight_info * threshold_info * other_info, axis=(1, 2))
+            t5 = time.time()
+            print("weight calc time {}".format(t2 - t1))
+            print("threshold calc time {}".format(t3 - t2))
+            print("other calc time {}".format(t4 - t3))
+            print("sum calc time {}".format(t5 - t4))
+            salience[l] = np.sum(get_weights(bins, harmonics, harmonic_weight, peaks) * get_thresholds(a_info)[None, None, :] * (a_info ** beta)[None, None, :], axis=(1, 2))
+        # print(f[np.argmax(salience[l])])
+
+        salience_threshold = 30
+        if np.argmax(salience[l]) < salience_threshold:
+            salience[l] = np.zeros(len(f))
+        print("Max magnitude: {}".format(np.argmax(salience[l])))
+
+    # plt.figure(1)
+    # plt.title("Signal Wave...")
+    # plt.plot(Zxx)
+    # plt.show()
+
+    # # impute missing 0's to compensate for starting timestamp
+    # pitch = np.insert(pitch, 0, [0]*8)
 
     # debug
-    # np.asarray(pitch).dump('f0.npy')
-    # print(len(pitch))
+    
+    pitch = np.array([f[np.argmax(salience[l])] for l in range(len(t))])
+    np.asarray(salience).dump('salience.npy')
 
     # convert f0 to midi notes
     print("Converting Hz to MIDI notes...")
