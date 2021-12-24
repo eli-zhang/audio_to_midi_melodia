@@ -182,9 +182,9 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
     np.set_printoptions(threshold=np.inf)
     np.set_printoptions(suppress=True)
 
-    interval = int(len(data)/3)
+    # interval = int(len(data)/3)
 
-    data = data[:interval] # Temporary: limit testing range
+    # data = data[:interval] # Temporary: limit testing range
 
     def butter_bandpass(lowcut, highcut, fs, order=5):
         nyq = 0.5 * fs
@@ -211,19 +211,8 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
     
     f, t, Zxx = signal.stft(data, fs, nperseg=nperseg, noverlap=noverlap, nfft=N)
     print("Finished fetching FFT")
-    # print(Zxx.shape) # f x t
-
-    # 0 Hz: [t1 t2 t3 t4]
-    # 1 Hz: [t1 t2 t3 t4]
-    # 2 Hz: [t1 t2 t3 t4]
-
-    # print(Zxx)
-    # print(f.shape) # 0 to fs / 2
-    # print(t.shape) # 0 to time in secs (duration of song)
 
     time_info = Zxx.T   # we use the transpose, which is t x f
-
-    # t0: [H1 H2 H3 H4 H5]
 
     def get_thresholds(a_info):
         gamma = 40
@@ -273,7 +262,8 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
         phi_l_minus_one = np.zeros(phi_l.shape[0]) if l == 0 else np.angle(time_info[l - 1][peak_idxs])
         return  N / 2 / np.pi / H * (((phi_l - phi_l_minus_one - 2 * np.pi * H / N * peak_idxs) + np.pi) % (2 * np.pi) - np.pi)
 
-    salience = np.zeros((len(t), len(f)))  # salience represents the likelihood that a frequency at a given time is the melody
+    b = np.arange(1, 601) # bins
+    salience = np.zeros((len(t), len(b)))  # salience represents the likelihood that a frequency at a given time is the melody
     N_h = 10
     beta = 1
     alpha = 0.8
@@ -298,13 +288,13 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
         hann_info = hann_info[valid_idxs]
         f_info = f_info[valid_idxs]
         a_info = a_info[valid_idxs]
-        
+
         I = len(peak_idxs)
 
         time5 = time.time()
-        bins = np.reshape(np.repeat(f, I * (N_h)), (len(f), N_h, I))
-        harmonics = np.reshape(np.tile(np.repeat(np.arange(1, N_h + 1), I), len(f)), (len(f), N_h, I))
-        peaks = np.reshape(np.tile(f_info, (len(f) * (N_h))), (len(f), N_h, I))
+        bins = np.reshape(np.repeat(b, I * (N_h)), (len(b), N_h, I))
+        harmonics = np.reshape(np.tile(np.repeat(np.arange(1, N_h + 1), I), len(b)), (len(b), N_h, I))
+        peaks = np.reshape(np.tile(f_info, (len(b) * (N_h))), (len(b), N_h, I))
 
         time6 = time.time()
 
@@ -320,7 +310,7 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
         # get_weights      # size: f x (N_h) x I array
 
         if (len(a_info) == 0):
-            salience[l] = np.zeros(len(f))
+            salience[l] = np.zeros(len(b))
         else:
             # do some timing
             # t1 = time.time()
@@ -342,30 +332,19 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
 
         salience_threshold = 0.1
         if np.max(salience[l]) < salience_threshold:
-            salience[l] = np.zeros(len(f))
+            salience[l] = np.zeros(len(b))
         # else:
             # print(salience[l])
             # print(np.argmax(salience[l]))
         # print("Max magnitude: {}".format(np.max(salience[l])))
 
-    # plt.pcolormesh(t, f, salience.T, shading='auto')
-    # plt.title('Salience Function')
-    # plt.ylabel('Frequency [Hz]')
-    # plt.xlabel('Time [sec]')
-    # plt.show()
-
-
-    # plt.figure(1)
-    # plt.title("Signal Wave...")
-    # plt.plot(salience)
-    # plt.show()
-
-    # # impute missing 0's to compensate for starting timestamp
-    # pitch = np.insert(pitch, 0, [0]*8)
-
     # debug
+    def bin_to_freq(bins):
+        diff = bins * 10
+        return np.where(bins == 0, 0, 55 * np.power(2, (diff / 1200)))
     
-    pitch = np.array([f[np.argmax(salience[l])] for l in range(len(t))])
+    bins = np.array([np.argmax(salience[l]) for l in range(len(t))])
+    pitch = bin_to_freq(bins)
     np.asarray(salience).dump('salience.npy')
 
     # convert f0 to midi notes
