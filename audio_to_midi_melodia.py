@@ -20,6 +20,9 @@ from matplotlib import rcParams as defaults
 from tqdm import tqdm
 import time
 
+np.set_printoptions(threshold=np.inf)
+np.set_printoptions(suppress=True)
+
 
 '''
 Extract the melody from an audio file and convert it to MIDI.
@@ -260,32 +263,8 @@ def elc(phon, frequencies=None):
         tck = interpolate.splrep(f, Lp, s=0)
         Lp = interpolate.splev(frequencies, tck, der=0)
     return Lp
-    
-def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
-                          savejams=False):
 
-    # define analysis parameters
-    fs = 6000 # Usually 44100, but the vocal range of humans only goes to around ~3000 Hz and we only care about the melody
-    hop = 128
-
-    # load audio using librosa
-    print("Loading audio...")
-    data, sr = soundfile.read(infile)
-    # mixdown to mono if needed
-    if len(data.shape) > 1 and data.shape[1] > 1:
-        data = data.mean(axis=1)
-    # resample to 44100 if needed
-    if sr != fs:
-        data = resampy.resample(data, sr, fs)
-        sr = fs
-
-    np.set_printoptions(threshold=np.inf)
-    np.set_printoptions(suppress=True)
-
-    interval = int(len(data)/3)
-
-    data = data[:interval] # Temporary: limit testing range
-
+def get_salience(fs, data, bin_count, M, H, N):
     def butter_bandpass(lowcut, highcut, fs, order=5):
         nyq = 0.5 * fs
         low = lowcut / nyq
@@ -300,14 +279,10 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
 
     data = butter_bandpass_filter(data, 50, 2000, fs, order=2)  # Run data through a bandpass filter to only include melodies within potential singing vocal range
 
-    # M = 2048 # Window length
-    # H = 128 # H is hopsize (defaults to nperseg - noverlap), used later
-    # N = 8192 # Length of FFT used (defaults to nperseg)
-    M = 1000
-    H = 100
-    N = 1000
     noverlap = M - H
     nperseg = M
+
+    # fs = 1 / s
     
     f, t, Zxx = signal.stft(data, fs, nperseg=nperseg, noverlap=noverlap, nfft=N)
 
@@ -321,20 +296,7 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
         return ((20 * np.log10(a_m / a_info)) < gamma).astype(int)
 
     def get_weights(bins, harmonics, harmonic_weight, peaks):  # tuples is an f x (N_h) x I array
-        # Need to find the weight for all weight(b, h, f_info[i])
         semitone_dists = np.abs(np.floor(1200 * np.log2(peaks / harmonics / 55) / 10 + 1) - bins) / 10
-        # # alpha = 0.8
-
-        # logical_or = np.logical_or(semitone_dists > 1, peaks <= 0)
-        # cosine = np.cos(semitone_dists * np.pi / 2)
-
-        # squared = cosine ** 2
-
-        # product = squared * harmonic_weight
-
-        # result = np.where(logical_or, 0, product)
-
-        # return result
         return np.where(semitone_dists > 1, 0, np.cos(semitone_dists * np.pi / 2) ** 2 * harmonic_weight)
 
     # Finds the indices of magnitude peaks for time step (frame number) l at time_info[l] (which is Zxx.T[l])
@@ -346,109 +308,105 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
         phi_l_minus_one = np.zeros(phi_l.shape[0]) if l == 0 else np.angle(time_info[l - 1][peak_idxs])
         return  N / 2 / np.pi / H * (((phi_l - phi_l_minus_one - 2 * np.pi * H / N * peak_idxs) + np.pi) % (2 * np.pi) - np.pi)
 
-    def bin_to_freq(bins):
-        diff = bins * 10
-        return np.where(bins == 0, 0, 55 * np.power(2, (diff / 1200)))
+    b = np.arange(bin_count) # bins
 
-    b = np.arange(600) # bins
+    salience = np.zeros((len(t), len(b)))  # salience represents the likelihood that a frequency at a given time is the melody
+    N_h = 10
+    beta = 1
+    alpha = 0.8
 
-    # salience = np.zeros((len(t), len(b)))  # salience represents the likelihood that a frequency at a given time is the melody
-    # N_h = 10
-    # beta = 1
-    # alpha = 0.8
+    for l in tqdm(range(len(t))): # for every time step
+        peak_idxs = find_peaks(l, time_info)    # indices of frequency peaks
+        b_offsets = get_bin_offsets(l, time_info, peak_idxs)
+        hann_info = 1 / 2 * np.sinc(np.pi * b_offsets) / (1 - np.square(b_offsets))
 
-    # for l in tqdm(range(len(t))): # for every time step
-    #     time1 = time.time()
-    #     peak_idxs = find_peaks(l, time_info)    # indices of frequency peaks
-    #     time2 = time.time()
-    #     b_offsets = get_bin_offsets(l, time_info, peak_idxs)
-    #     time3 = time.time()
-    #     hann_info = 1 / 2 * np.sinc(np.pi * b_offsets) / (1 - np.square(b_offsets))
-    #     time4 = time.time()
+        f_info = (peak_idxs + b_offsets) * fs / N # size = number of frequency peaks
+        a_info = 1 / 2 * np.abs(time_info[l][peak_idxs]) / hann_info
 
-    #     f_info = (peak_idxs + b_offsets) * fs / N # size = number of frequency peaks
-    #     a_info = 1 / 2 * np.abs(time_info[l][peak_idxs]) / hann_info
+        # we ignore invalid values for future processing
+        invalid_idxs = np.logical_or(f_info <= 0, a_info <= 0)  
+        valid_idxs = ~invalid_idxs
+        peak_idxs = peak_idxs[valid_idxs]
+        b_offsets = b_offsets[valid_idxs]
+        hann_info = hann_info[valid_idxs]
+        f_info = f_info[valid_idxs]
+        a_info = a_info[valid_idxs]
 
-    #     # we ignore invalid values for future processing
-    #     invalid_idxs = np.logical_or(f_info <= 0, a_info <= 0)  
-    #     valid_idxs = ~invalid_idxs
-    #     peak_idxs = peak_idxs[valid_idxs]
-    #     b_offsets = b_offsets[valid_idxs]
-    #     hann_info = hann_info[valid_idxs]
-    #     f_info = f_info[valid_idxs]
-    #     a_info = a_info[valid_idxs]
+        I = len(peak_idxs)
 
-    #     I = len(peak_idxs)
+        bins = np.reshape(np.repeat(b, I * (N_h)), (len(b), N_h, I))
+        harmonics = np.reshape(np.tile(np.repeat(np.arange(1, N_h + 1), I), len(b)), (len(b), N_h, I))
+        peaks = np.reshape(np.tile(f_info, (len(b) * (N_h))), (len(b), N_h, I))
 
-    #     time5 = time.time()
-    #     bins = np.reshape(np.repeat(b, I * (N_h)), (len(b), N_h, I))
-    #     harmonics = np.reshape(np.tile(np.repeat(np.arange(1, N_h + 1), I), len(b)), (len(b), N_h, I))
-    #     peaks = np.reshape(np.tile(f_info, (len(b) * (N_h))), (len(b), N_h, I))
+        harmonic_weight = np.power(alpha, harmonics - 1)
+        # get_thresholds   # size: I (# of peaks)
+        # get_weights      # size: f x (N_h) x I array
+        if (len(a_info) == 0):
+            salience[l] = np.zeros(len(b))
+        else:
+            salience[l] = np.sum(get_weights(bins, harmonics, harmonic_weight, peaks) * get_thresholds(a_info)[None, None, :] * (a_info ** beta)[None, None, :], axis=(1, 2))
+    return salience
 
-    #     time6 = time.time()
+def bins_to_freqs(bins):
+    diff = bins * 10
+    return np.where(bins == 0, 0, 55 * np.power(2, (diff / 1200)))
 
-    #     # print("find peaks time {}".format(time2 - time1))
-    #     # print("offset time {}".format(time3 - time2))
-    #     # print("hann time {}".format(time4 - time3))
-    #     # print("info time {}".format(time5 - time4))
-    #     # print("list comp time {}".format(time6 - time5))
-
-    #     harmonic_weight = np.power(alpha, harmonics - 1)
-
-    #     # get_thresholds   # size: I (# of peaks)
-    #     # get_weights      # size: f x (N_h) x I array
-
-    #     if (len(a_info) == 0):
-    #         salience[l] = np.zeros(len(b))
-    #     else:
-    #         # do some timing
-    #         # t1 = time.time()
-    #         # weight_info = get_weights(bins, harmonics, harmonic_weight, peaks)
-    #         # t2 = time.time()
-    #         # threshold_info = get_thresholds(a_info)[None, None, :]
-    #         # t3 = time.time()
-    #         # other_info = (a_info ** beta)[None, None, :]
-    #         # t4 = time.time()
-    #         # sum = np.sum(weight_info * threshold_info * other_info, axis=(1, 2))
-    #         # t5 = time.time()
-    #         # print("weight calc time {}".format(t2 - t1))
-    #         # print("threshold calc time {}".format(t3 - t2))
-    #         # print("other calc time {}".format(t4 - t3))
-    #         # print("sum calc time {}".format(t5 - t4))
-    #         # salience[l] = sum
-    #         salience[l] = np.sum(get_weights(bins, harmonics, harmonic_weight, peaks) * get_thresholds(a_info)[None, None, :] * (a_info ** beta)[None, None, :], axis=(1, 2))
-    #     # print(f[np.argmax(salience[l])])
-
-    #     # salience_threshold = 0.1
-    #     # if np.max(salience[l]) < salience_threshold:
-    #     #     salience[l] = np.zeros(len(b))
-    #     # print("Max magnitude: {}".format(np.max(salience[l])))
-
-    # # debug
+def apply_equal_loudness_contour(salience, bin_count):
+    volume_scale = elc(60, bins_to_freqs(np.arange(bin_count))[1:])
+    min_val = min(volume_scale)
+    volume_scale = min_val / volume_scale
+    volume_scale = np.insert(volume_scale, 0, 0, axis=0)
+    return np.multiply(salience, volume_scale)
     
-    # # apply equal loudness contour (ideally should be done before)
-    # # volume_scale = elc(60, bin_to_freq(b)[1:])
-    # # min_val = min(volume_scale)
-    # # volume_scale = min_val / volume_scale
-    # # volume_scale = np.insert(volume_scale, 0, 0, axis=0)
-    
-    # # salience = np.multiply(salience, volume_scale)
+def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
+                          savejams=False):
 
-    
+    # define analysis parameters
+    # Pretty good: fs=8192, M=256, H=32, N=1024
 
-    # # Up to this point, you can already output a midi; just run 
-    # # bins = np.array([np.argmax(salience[l]) for l in range(len(t))])
-    # # pitch = bin_to_freq(bins)
+    fs = 8192 # Usually 44100, but the vocal range of humans only goes to around ~3000 Hz and we only care about the melody
+    M=256  # M: Window length
+    H=32   # H: hopsize (defaults to nperseg - noverlap), used later
+    N=1024  # N: Length of FFT used (defaults to nperseg)
+    # Window has to be at least 1 / 3000 = 0.333 msec in size
+    # Distance between bins: Fs / N
+    hop = H
+    bin_count = 600
+
+    # load audio using librosa
+    print("Loading audio...")
+    data, sr = soundfile.read(infile)
+    # mixdown to mono if needed
+    if len(data.shape) > 1 and data.shape[1] > 1:
+        data = data.mean(axis=1)
+    # resample to 44100 if needed
+    if sr != fs:
+        data = resampy.resample(data, sr, fs)
+        sr = fs
+
+    interval = int(len(data)/3)
+
+    # data = data[:interval] # Temporary: limit testing range
+
+    # salience = np.load('salience.npy', allow_pickle=True)
+
+    salience = get_salience(fs, data, bin_count, M=M, H=H, N=N)
+
+    np.asarray(salience).dump('salience.npy')
+    print("Saved salience to 'salience.npy'.")
+
+    # apply_equal_loudness_contour(salience, bin_count)
+
+    # debug
+    # Up to this point, you can already output a midi; just run 
+    # bins = np.array([np.argmax(salience[l]) for l in range(len(t))])
+    # pitch = bin_to_freq(bins)
 
     ## Everything afterwards is creating pitch contours
-
-    salience = np.load('salience.npy', allow_pickle=True)
-    
-
     salience_threshold = 0.9    # every value below (salience_threshold * max_val) in the frame is set to 0
     std_threshold = 0.9   # we can sweep this 
 
-    max_vals = np.reshape(np.repeat(np.amax(salience, axis=1), len(b)), salience.shape)
+    max_vals = np.reshape(np.repeat(np.amax(salience, axis=1), bin_count), salience.shape)
     salience_filter = salience < max_vals * salience_threshold
     s_plus = np.where(salience_filter, 0, salience)   # filter out irrelevant values
     nonzero_salience = np.copy(s_plus)
@@ -465,7 +423,16 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
     contours = [] # 2d list of lists of tuples
 
     # construct contours
-    while np.sum(s_plus) > 0:
+    original_sum = np.sum(s_plus)
+    old = original_sum
+    curr = original_sum
+    sum_threshold_percent = 0.998
+    target_sum = (1 - sum_threshold_percent) * original_sum
+    pbar = tqdm(total=(sum_threshold_percent * original_sum))
+
+
+    while curr > target_sum:
+        pbar.update(old - curr)
         contour = []
         highest_peak_idx = np.unravel_index(np.argmax(s_plus, axis=None), s_plus.shape)
         s_plus[highest_peak_idx] = 0
@@ -477,14 +444,14 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
             new_bin = -1
             contour_gap_counter = 0 # tracks how long contour has not been in s_plus but still in s_minus
             for test_bin in range(curr_bin - bin_threshold, curr_bin + bin_threshold + 1):
-                if test_bin > 0 and test_bin < len(b): # valid bin number
+                if test_bin > 0 and test_bin < bin_count: # valid bin number
                     if s_plus[curr_frame][test_bin] > 0 and (not found_bin or s_plus[curr_frame][test_bin] > s_plus[curr_frame][new_bin]):
                         found_bin = True
                         new_bin = test_bin
                         contour_gap_counter = 0
             if not found_bin:   # now we check s_minus in case weaker contour continues
                 for test_bin in range(curr_bin - bin_threshold, curr_bin + bin_threshold + 1):
-                    if test_bin > 0 and test_bin < len(b):
+                    if test_bin > 0 and test_bin < bin_count:
                         if s_minus[curr_frame][test_bin] > 0 and (not found_bin or s_minus[curr_frame][test_bin] > s_minus[curr_frame][new_bin]):
                             found_bin = True
                             new_bin = test_bin
@@ -500,14 +467,14 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
             found_bin = False
             new_bin = -1
             for test_bin in range(curr_bin - bin_threshold, curr_bin + bin_threshold + 1):
-                if test_bin > 0 and test_bin < len(b): # valid bin number
+                if test_bin > 0 and test_bin < bin_count: # valid bin number
                     if s_plus[curr_frame][test_bin] > 0 and (not found_bin or s_plus[curr_frame][test_bin] > s_plus[curr_frame][new_bin]):
                         found_bin = True
                         new_bin = test_bin
                         contour_gap_counter = 0
             if not found_bin:   # now we check s_minus in case weaker contour continues
                 for test_bin in range(curr_bin - bin_threshold, curr_bin + bin_threshold + 1):
-                    if test_bin > 0 and test_bin < len(b):
+                    if test_bin > 0 and test_bin < bin_count:
                         if s_minus[curr_frame][test_bin] > 0 and (not found_bin or s_minus[curr_frame][test_bin] > s_minus[curr_frame][new_bin]):
                             found_bin = True
                             new_bin = test_bin
@@ -519,7 +486,9 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
                 curr_bin = new_bin
                 contour.insert(0, (curr_frame, curr_bin))   # prepend info to contour
         contours.append(contour)
-
+        old = curr
+        curr = np.sum(s_plus)
+    pbar.close()
     print("Done extracting contours")
 
     def get_mean(contour):
@@ -532,45 +501,37 @@ def audio_to_midi_melodia(infile, outfile, bpm, smooth=0.25, minduration=0.1,
     filter_lenience = 0.2
     voicing_threshold = distribution_mean - filter_lenience * distribution_std
 
-    # contour_means.sort()
-    # print(contour_means)
-    # print(distribution_mean)
-    # print(distribution_std)
-    # print(voicing_threshold)
-
     passing_contours = list(filter(lambda contour: get_mean(contour) >= voicing_threshold, contours))
     print(len(contours))
     print(len(passing_contours))
     
     final_saliences = np.zeros(salience.shape)
     for contour in passing_contours:
-        for (frame, bin) in contour:
+        for frame, bin in contour:
             final_saliences[frame][bin] = salience[frame][bin]
 
-    # bins = np.array([np.argmax(final_saliences[l]) for l in range(len(t))])
-    # pitch = bin_to_freq(bins)
-    # np.asarray(salience).dump('salience.npy')
-    
+    # final_saliences = salience
 
+    # convert f0 to midi notes
+    print("Converting Hz to MIDI notes...")
+    # segment sequence into individual midi notes
+
+    bins = np.array([np.argmax(final_saliences[l]) for l in range(final_saliences.shape[0])])
+    pitch = bins_to_freqs(bins)
+    midi_pitch = hz2midi(pitch)
+    notes = midi_to_notes(midi_pitch, fs, hop, smooth, minduration)
+
+    # alternatively, export all valid notes
     def single_bin_to_freq(bin):
         diff = bin * 10
         return 0 if bin == 0 else (55 * 2 ** (diff / 1200))
 
-    all_bins = [np.nonzero(salience_frame)[0] for salience_frame in final_saliences]
-    # print([[single_bin_to_freq(bin) for bin in bin_frame] for bin_frame in all_bins])
-    all_pitches = [[single_bin_to_freq(bin) for bin in bin_frame] for bin_frame in all_bins]
+    # final_saliences = s_plus
+    # all_bins = [np.nonzero(salience_frame)[0] for salience_frame in final_saliences]
+    # all_pitches = [[single_bin_to_freq(bin) for bin in bin_frame] for bin_frame in all_bins]
+    # midi_pitches = hz2midi_many(all_pitches)
+    # notes = many_midi_to_notes(midi_pitches, fs, hop, smooth, minduration)
 
-    midi_pitches = hz2midi_many(all_pitches)
-    # midi_pitch = hz2midi(all_pitches)
-
-    # convert f0 to midi notes
-    print("Converting Hz to MIDI notes...")
-    # midi_pitch = hz2midi(pitch)
-
-    # segment sequence into individual midi notes
-    notes = many_midi_to_notes(midi_pitches, fs, hop, smooth, minduration)
-
-    # notes = midi_to_notes(midi_pitch, fs, hop, smooth, minduration)
 
     # save note sequence to a midi file
     print("Saving MIDI to disk...")
