@@ -1,5 +1,5 @@
-# audio_to_midi_melodia
-Extract the melody notes from an audio file and export them to MIDI and (optionally) JAMS files.
+# Melody Extraction (based on Melodia algorithm)
+_This fork uses a custom Python-only implementation (mainly numpy and some scipy) of the Melodia algorithm. It is based on the following [research paper](https://repositori.upf.edu/bitstream/handle/10230/42183/Gomez_iee_melo.pdf?sequence=1&isAllowed=y), but has more naive contour extraction and takes longer to run (although a lot of numpy operations are vectorized). It also can run on Python3. The original intention of this implementation was to be able to run melody extraction without any external dependencies (like the Vamp plugin) that didn't work on new Apple Silicon macs. It has only been tested on an M1 Macbook Air and mainly used with vocals extracted using [spleeter](https://github.com/deezer/spleeter)._
 
 The script extracts the melody from an audio file using the [Melodia](http://mtg.upf.edu/technologies/melodia) algorithm, and then segments the continuous pitch sequence into a series of quantized notes, and exports to MIDI using the provided BPM. If the `--jams` option is specified the script will also save the output as a JAMS file. Note that the JAMS file uses the original note onset/offset times estimated by the algorithm and ignores the provided BPM value.
 
@@ -43,40 +43,21 @@ optional arguments:
 # Installation
 **Windows users:** if you run into any installation issues please [read and try the solutions on this thread](https://github.com/justinsalamon/audio_to_midi_melodia/issues/4) before posting an issue, thanks!
 
-### Non-python dependencies
-- Melodia melody extraction Vamp plugin: http://mtg.upf.edu/technologies/melodia
-- Please read and follow the installation instructions in Melodia's README file.
 ### Python dependencies
-This program requires Python 2.7 (it has not been tested on Python 3 and might crash).
-
-**Windows users must use a 32-bit installation of Python 2.7**, even if their OS is 64 bit, and **place the Melodia vamp plugin files in the correct path** (`C:\Program Files (x86)\Vamp Plugins`). Otherwise you might get the following error: `TypeError: Failed to load plugin: mtg-melodia:melodia`.
+This program requires Python 3.
 
 All python dependencies (listed below) can be installed by calling `pip install -r requirements.txt`.
 - soundfile: https://pypi.org/project/SoundFile/
 - resampy: https://pypi.org/project/resampy/
-- vamp: https://pypi.python.org/pypi/vamp
 - midiutil: https://pypi.org/project/MIDIUtil/
 - jams: https://pypi.org/project/jams/
 - numpy: https://pypi.org/project/numpy/
 - scipy: https://pypi.org/project/scipy/
 
-Known to work with the following module versions on python 2.7:
-- SoundFile==0.10.2
-- resampy==0.2.1
-- vamp==1.1.0
+Known to work with the following module versions on python 3.9.7:
+- SoundFile==0.10.3.post1
+- resampy==0.2.2
 - MIDIUtil==1.2.1
-- jams==0.3.3
-- numpy==1.16.2
-- scipy==1.2.1
-
-# How to contribute
-If you would like to contribute a feature and/or bugfix to this repository, please follow the following steps:
-1. Create an issue describing the bug/feature
-2. I will reply on the issue thread to determine whether the feature can/should be added
-3. Discuss design/implementation details in the issue thread and reach consensus
-4. Once consensus is reached re: design/implementation, start a pull request
-5. Request code review once the pull requets is ready for review
-6. Fix requested changes to the pull request (if any)
-7. Pull request will then be merged
-
-IMPORTANT: please be sure to always discuss a proposed feature/fix in an issue *before* creating a pull request.
+- jams==0.3.4
+- numpy==1.20.0
+- scipy==1.7.3
